@@ -9,6 +9,13 @@
 (define-constant ERR_PROPOSAL_NOT_PASSED (err u107))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u108))
 (define-constant ERR_INVALID_AMOUNT (err u109))
+(define-constant ERR_RENT_NOT_SET (err u110))
+(define-constant ERR_RENT_ALREADY_PAID (err u111))
+(define-constant ERR_RENT_PERIOD_NOT_STARTED (err u112))
+
+(define-data-var monthly-rent uint u0)
+(define-data-var rent-due-block uint u0)
+(define-data-var rent-period-length uint u4320)
 
 (define-data-var total-shares uint u0)
 (define-data-var proposal-counter uint u0)
@@ -248,4 +255,77 @@
 
 (define-read-only (get-total-maintenance-records)
     (var-get maintenance-counter)
+)
+
+
+(define-map rent-payments {member: principal, period: uint} {
+    amount-paid: uint,
+    payment-block: uint,
+    late-payment: bool
+})
+
+(define-data-var current-rent-period uint u0)
+
+(define-public (set-monthly-rent (rent-amount uint) (start-block uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (> rent-amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (> start-block stacks-block-height) ERR_INVALID_AMOUNT)
+        (var-set monthly-rent rent-amount)
+        (var-set rent-due-block start-block)
+        (var-set current-rent-period u1)
+        (ok true)
+    )
+)
+
+(define-public (pay-rent)
+    (let (
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (rent-amount (var-get monthly-rent))
+        (current-period (var-get current-rent-period))
+        (due-block (var-get rent-due-block))
+        (period-length (var-get rent-period-length))
+        (adjusted-period (if (>= stacks-block-height due-block)
+            (+ current-period (/ (- stacks-block-height due-block) period-length))
+            current-period))
+    )
+        (begin
+            (asserts! (> rent-amount u0) ERR_RENT_NOT_SET)
+            (asserts! (get active member-data) ERR_NOT_MEMBER)
+            (asserts! (>= stacks-block-height due-block) ERR_RENT_PERIOD_NOT_STARTED)
+            (asserts! (is-none (map-get? rent-payments {member: tx-sender, period: adjusted-period})) ERR_RENT_ALREADY_PAID)
+            (try! (stx-transfer? rent-amount tx-sender (as-contract tx-sender)))
+            (map-set rent-payments {member: tx-sender, period: adjusted-period} {
+                amount-paid: rent-amount,
+                payment-block: stacks-block-height,
+                late-payment: (> stacks-block-height (+ due-block (* adjusted-period period-length)))
+            })
+            (var-set current-rent-period adjusted-period)
+            (ok adjusted-period)
+        )
+    )
+)
+
+(define-read-only (check-rent-status (member principal) (period uint))
+    (map-get? rent-payments {member: member, period: period})
+)
+
+(define-read-only (get-rent-info)
+    {
+        monthly-rent: (var-get monthly-rent),
+        rent-due-block: (var-get rent-due-block),
+        current-period: (var-get current-rent-period),
+        period-length: (var-get rent-period-length)
+    }
+)
+
+(define-read-only (get-current-rent-period)
+    (let (
+        (due-block (var-get rent-due-block))
+        (period-length (var-get rent-period-length))
+    )
+        (if (>= stacks-block-height due-block)
+            (+ u1 (/ (- stacks-block-height due-block) period-length))
+            u0)
+    )
 )
