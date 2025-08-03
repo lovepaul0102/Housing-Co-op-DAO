@@ -13,6 +13,11 @@
 (define-constant ERR_RENT_ALREADY_PAID (err u111))
 (define-constant ERR_RENT_PERIOD_NOT_STARTED (err u112))
 
+(define-constant REPUTATION_VOTE_BONUS u10)
+(define-constant REPUTATION_PROPOSAL_SUCCESS_BONUS u25)
+(define-constant REPUTATION_MAINTENANCE_BONUS u15)
+(define-constant REPUTATION_DECAY_RATE u2)
+
 (define-data-var monthly-rent uint u0)
 (define-data-var rent-due-block uint u0)
 (define-data-var rent-period-length uint u4320)
@@ -327,5 +332,107 @@
         (if (>= stacks-block-height due-block)
             (+ u1 (/ (- stacks-block-height due-block) period-length))
             u0)
+    )
+)
+
+
+(define-map member-reputation principal {
+    base-score: uint,
+    votes-cast: uint,
+    proposals-created: uint,
+    proposals-passed: uint,
+    maintenance-contributions: uint,
+    last-activity-block: uint
+})
+
+(define-public (update-reputation-vote (member principal))
+    (let (
+        (current-rep (default-to {
+            base-score: u100,
+            votes-cast: u0,
+            proposals-created: u0,
+            proposals-passed: u0,
+            maintenance-contributions: u0,
+            last-activity-block: stacks-block-height
+        } (map-get? member-reputation member)))
+        (decayed-score (calculate-decay (get base-score current-rep) (get last-activity-block current-rep)))
+    )
+        (begin
+            (map-set member-reputation member (merge current-rep {
+                base-score: (+ decayed-score REPUTATION_VOTE_BONUS),
+                votes-cast: (+ (get votes-cast current-rep) u1),
+                last-activity-block: stacks-block-height
+            }))
+            (ok true)
+        )
+    )
+)
+
+(define-public (update-reputation-proposal-success (member principal))
+    (let (
+        (current-rep (unwrap! (map-get? member-reputation member) (err u404)))
+        (decayed-score (calculate-decay (get base-score current-rep) (get last-activity-block current-rep)))
+    )
+        (begin
+            (map-set member-reputation member (merge current-rep {
+                base-score: (+ decayed-score REPUTATION_PROPOSAL_SUCCESS_BONUS),
+                proposals-passed: (+ (get proposals-passed current-rep) u1),
+                last-activity-block: stacks-block-height
+            }))
+            (ok true)
+        )
+    )
+)
+
+(define-public (update-reputation-maintenance (member principal))
+    (let (
+        (current-rep (default-to {
+            base-score: u100,
+            votes-cast: u0,
+            proposals-created: u0,
+            proposals-passed: u0,
+            maintenance-contributions: u0,
+            last-activity-block: stacks-block-height
+        } (map-get? member-reputation member)))
+        (decayed-score (calculate-decay (get base-score current-rep) (get last-activity-block current-rep)))
+    )
+        (begin
+            (map-set member-reputation member (merge current-rep {
+                base-score: (+ decayed-score REPUTATION_MAINTENANCE_BONUS),
+                maintenance-contributions: (+ (get maintenance-contributions current-rep) u1),
+                last-activity-block: stacks-block-height
+            }))
+            (ok true)
+        )
+    )
+)
+
+(define-private (calculate-decay (score uint) (last-block uint))
+    (let ((blocks-since-activity (- stacks-block-height last-block)))
+        (if (> blocks-since-activity u1440)
+            (let ((decayed-score (- score (* (/ blocks-since-activity u1440) REPUTATION_DECAY_RATE))))
+                (if (> decayed-score u50) decayed-score u50)
+            )
+            score
+        )
+    )
+)
+
+(define-read-only (get-member-reputation (member principal))
+    (map-get? member-reputation member)
+)
+
+(define-read-only (get-effective-voting-weight (member principal))
+    (match (map-get? members member)
+        member-data 
+        (match (map-get? member-reputation member)
+            rep-data
+            (let ((base-shares (get shares member-data))
+                  (reputation-multiplier (/ (get base-score rep-data) u100)))
+                (+ base-shares (/ (* base-shares reputation-multiplier) u10))
+            )
+            (get shares member-data)
+        )
+        u0
     )
 )
