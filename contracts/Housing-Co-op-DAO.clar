@@ -18,6 +18,14 @@
 (define-constant REPUTATION_MAINTENANCE_BONUS u15)
 (define-constant REPUTATION_DECAY_RATE u2)
 
+(define-constant ERR_NO_EMERGENCY_REQUEST (err u113))
+(define-constant ERR_EMERGENCY_ALREADY_VOTED (err u114))
+(define-constant ERR_EMERGENCY_NOT_APPROVED (err u115))
+(define-constant ERR_INSUFFICIENT_EMERGENCY_FUNDS (err u116))
+
+(define-data-var emergency-fund-balance uint u0)
+(define-data-var emergency-request-counter uint u0)
+
 (define-data-var monthly-rent uint u0)
 (define-data-var rent-due-block uint u0)
 (define-data-var rent-period-length uint u4320)
@@ -435,4 +443,116 @@
         )
         u0
     )
+)
+
+
+(define-map emergency-fund-contributions principal uint)
+
+(define-map emergency-requests uint {
+    requester: principal,
+    reason: (string-ascii 200),
+    amount: uint,
+    created-block: uint,
+    votes-for: uint,
+    votes-against: uint,
+    end-block: uint,
+    approved: bool,
+    paid: bool
+})
+
+(define-map emergency-votes {request-id: uint, voter: principal} bool)
+
+(define-public (contribute-to-emergency-fund (amount uint))
+    (let (
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (current-contribution (default-to u0 (map-get? emergency-fund-contributions tx-sender)))
+    )
+        (begin
+            (asserts! (get active member-data) ERR_NOT_MEMBER)
+            (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+            (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+            (map-set emergency-fund-contributions tx-sender (+ current-contribution amount))
+            (var-set emergency-fund-balance (+ (var-get emergency-fund-balance) amount))
+            (ok amount)
+        )
+    )
+)
+
+(define-public (request-emergency-funds (reason (string-ascii 200)) (amount uint))
+    (let (
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (request-id (+ (var-get emergency-request-counter) u1))
+    )
+        (begin
+            (asserts! (get active member-data) ERR_NOT_MEMBER)
+            (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+            (asserts! (<= amount (var-get emergency-fund-balance)) ERR_INSUFFICIENT_EMERGENCY_FUNDS)
+            (map-set emergency-requests request-id {
+                requester: tx-sender,
+                reason: reason,
+                amount: amount,
+                created-block: stacks-block-height,
+                votes-for: u0,
+                votes-against: u0,
+                end-block: (+ stacks-block-height u72),
+                approved: false,
+                paid: false
+            })
+            (var-set emergency-request-counter request-id)
+            (ok request-id)
+        )
+    )
+)
+
+(define-public (vote-emergency-request (request-id uint) (approve bool))
+    (let (
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (request-data (unwrap! (map-get? emergency-requests request-id) ERR_NO_EMERGENCY_REQUEST))
+    )
+        (begin
+            (asserts! (get active member-data) ERR_NOT_MEMBER)
+            (asserts! (< stacks-block-height (get end-block request-data)) ERR_PROPOSAL_EXPIRED)
+            (asserts! (is-none (map-get? emergency-votes {request-id: request-id, voter: tx-sender})) ERR_EMERGENCY_ALREADY_VOTED)
+            (map-set emergency-votes {request-id: request-id, voter: tx-sender} approve)
+            (if approve
+                (map-set emergency-requests request-id (merge request-data {
+                    votes-for: (+ (get votes-for request-data) u1)
+                }))
+                (map-set emergency-requests request-id (merge request-data {
+                    votes-against: (+ (get votes-against request-data) u1)
+                }))
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (execute-emergency-payout (request-id uint))
+    (let (
+        (request-data (unwrap! (map-get? emergency-requests request-id) ERR_NO_EMERGENCY_REQUEST))
+        (required-votes (/ (var-get total-shares) u3))
+    )
+        (begin
+            (asserts! (>= stacks-block-height (get end-block request-data)) ERR_PROPOSAL_EXPIRED)
+            (asserts! (not (get paid request-data)) ERR_PROPOSAL_NOT_FOUND)
+            (asserts! (>= (get votes-for request-data) required-votes) ERR_EMERGENCY_NOT_APPROVED)
+            (asserts! (> (get votes-for request-data) (get votes-against request-data)) ERR_EMERGENCY_NOT_APPROVED)
+            (try! (as-contract (stx-transfer? (get amount request-data) tx-sender (get requester request-data))))
+            (var-set emergency-fund-balance (- (var-get emergency-fund-balance) (get amount request-data)))
+            (map-set emergency-requests request-id (merge request-data {approved: true, paid: true}))
+            (ok (get amount request-data))
+        )
+    )
+)
+
+(define-read-only (get-emergency-fund-balance)
+    (var-get emergency-fund-balance)
+)
+
+(define-read-only (get-emergency-request (request-id uint))
+    (map-get? emergency-requests request-id)
+)
+
+(define-read-only (get-member-emergency-contributions (member principal))
+    (default-to u0 (map-get? emergency-fund-contributions member))
 )
