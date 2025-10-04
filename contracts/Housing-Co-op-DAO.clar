@@ -23,6 +23,14 @@
 (define-constant ERR_EMERGENCY_NOT_APPROVED (err u115))
 (define-constant ERR_INSUFFICIENT_EMERGENCY_FUNDS (err u116))
 
+(define-constant ERR_DISPUTE_NOT_FOUND (err u117))
+(define-constant ERR_DISPUTE_ALREADY_VOTED (err u118))
+(define-constant ERR_DISPUTE_NOT_RESOLVED (err u119))
+(define-constant ERR_CANNOT_DISPUTE_SELF (err u120))
+(define-constant ERR_DISPUTE_PERIOD_ACTIVE (err u121))
+
+(define-data-var dispute-counter uint u0)
+
 (define-data-var emergency-fund-balance uint u0)
 (define-data-var emergency-request-counter uint u0)
 
@@ -555,4 +563,131 @@
 
 (define-read-only (get-member-emergency-contributions (member principal))
     (default-to u0 (map-get? emergency-fund-contributions member))
+)
+
+
+(define-map disputes uint {
+    complainant: principal,
+    defendant: principal,
+    category: (string-ascii 50),
+    description: (string-ascii 300),
+    votes-guilty: uint,
+    votes-innocent: uint,
+    penalty-amount: uint,
+    created-block: uint,
+    end-block: uint,
+    resolved: bool,
+    verdict-guilty: bool
+})
+
+(define-map dispute-votes {dispute-id: uint, voter: principal} bool)
+
+(define-map member-dispute-history principal {
+    disputes-filed: uint,
+    disputes-against: uint,
+    guilty-verdicts: uint
+})
+
+(define-public (file-dispute (defendant principal) (category (string-ascii 50)) (description (string-ascii 300)) (penalty uint))
+    (let (
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (defendant-data (unwrap! (map-get? members defendant) ERR_NOT_MEMBER))
+        (dispute-id (+ (var-get dispute-counter) u1))
+        (complainant-history (default-to {disputes-filed: u0, disputes-against: u0, guilty-verdicts: u0} 
+            (map-get? member-dispute-history tx-sender)))
+        (defendant-history (default-to {disputes-filed: u0, disputes-against: u0, guilty-verdicts: u0} 
+            (map-get? member-dispute-history defendant)))
+    )
+        (begin
+            (asserts! (get active member-data) ERR_NOT_MEMBER)
+            (asserts! (get active defendant-data) ERR_NOT_MEMBER)
+            (asserts! (not (is-eq tx-sender defendant)) ERR_CANNOT_DISPUTE_SELF)
+            (map-set disputes dispute-id {
+                complainant: tx-sender,
+                defendant: defendant,
+                category: category,
+                description: description,
+                votes-guilty: u0,
+                votes-innocent: u0,
+                penalty-amount: penalty,
+                created-block: stacks-block-height,
+                end-block: (+ stacks-block-height u288),
+                resolved: false,
+                verdict-guilty: false
+            })
+            (map-set member-dispute-history tx-sender 
+                (merge complainant-history {disputes-filed: (+ (get disputes-filed complainant-history) u1)}))
+            (map-set member-dispute-history defendant 
+                (merge defendant-history {disputes-against: (+ (get disputes-against defendant-history) u1)}))
+            (var-set dispute-counter dispute-id)
+            (ok dispute-id)
+        )
+    )
+)
+
+(define-public (vote-on-dispute (dispute-id uint) (vote-guilty bool))
+    (let (
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (dispute-data (unwrap! (map-get? disputes dispute-id) ERR_DISPUTE_NOT_FOUND))
+        (member-shares (get shares member-data))
+    )
+        (begin
+            (asserts! (get active member-data) ERR_NOT_MEMBER)
+            (asserts! (< stacks-block-height (get end-block dispute-data)) ERR_PROPOSAL_EXPIRED)
+            (asserts! (not (get resolved dispute-data)) ERR_DISPUTE_PERIOD_ACTIVE)
+            (asserts! (is-none (map-get? dispute-votes {dispute-id: dispute-id, voter: tx-sender})) ERR_DISPUTE_ALREADY_VOTED)
+            (map-set dispute-votes {dispute-id: dispute-id, voter: tx-sender} vote-guilty)
+            (if vote-guilty
+                (map-set disputes dispute-id (merge dispute-data {
+                    votes-guilty: (+ (get votes-guilty dispute-data) member-shares)
+                }))
+                (map-set disputes dispute-id (merge dispute-data {
+                    votes-innocent: (+ (get votes-innocent dispute-data) member-shares)
+                }))
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (resolve-dispute (dispute-id uint))
+    (let (
+        (dispute-data (unwrap! (map-get? disputes dispute-id) ERR_DISPUTE_NOT_FOUND))
+        (total-votes (+ (get votes-guilty dispute-data) (get votes-innocent dispute-data)))
+        (required-quorum (/ (var-get total-shares) u3))
+        (guilty-verdict (> (get votes-guilty dispute-data) (get votes-innocent dispute-data)))
+        (defendant-history (default-to {disputes-filed: u0, disputes-against: u0, guilty-verdicts: u0}
+            (map-get? member-dispute-history (get defendant dispute-data))))
+    )
+        (begin
+            (asserts! (>= stacks-block-height (get end-block dispute-data)) ERR_PROPOSAL_EXPIRED)
+            (asserts! (not (get resolved dispute-data)) ERR_DISPUTE_NOT_RESOLVED)
+            (asserts! (>= total-votes required-quorum) ERR_PROPOSAL_NOT_PASSED)
+            (map-set disputes dispute-id (merge dispute-data {
+                resolved: true,
+                verdict-guilty: guilty-verdict
+            }))
+            (if guilty-verdict
+                (begin
+                    (map-set member-dispute-history (get defendant dispute-data)
+                        (merge defendant-history {guilty-verdicts: (+ (get guilty-verdicts defendant-history) u1)}))
+                    (ok {verdict: "guilty", penalty: (get penalty-amount dispute-data)})
+                )
+                (ok {verdict: "innocent", penalty: u0})
+            )
+        )
+    )
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+    (map-get? disputes dispute-id)
+)
+
+(define-read-only (get-member-dispute-history (member principal))
+    (default-to {disputes-filed: u0, disputes-against: u0, guilty-verdicts: u0}
+        (map-get? member-dispute-history member))
+)
+
+(define-read-only (get-total-disputes)
+    (var-get dispute-counter)
 )
