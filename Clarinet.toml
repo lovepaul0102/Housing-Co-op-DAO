@@ -1,0 +1,28 @@
+[project]
+name = 'Housing-Co-op-DAO'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Housing-Co-op-DAO]
+path = 'contracts/Housing-Co-op-DAO.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.dividend-distribution]
+path = 'contracts/dividend-distribution.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
+
+[repl.remote_data]
+enabled = false
+api_url = 'https://api.hiro.so'
