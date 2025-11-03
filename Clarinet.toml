@@ -9,6 +9,11 @@ requirements = []
 path = 'contracts/Housing-Co-op-DAO.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.dividend-distribution]
+path = 'contracts/dividend-distribution.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
